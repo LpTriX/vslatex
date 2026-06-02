@@ -1,0 +1,25 @@
+{
+    "latex-workshop.latex.outDir": "out",
+    "latex-workshop.latex.tools": [
+        {
+            "name": "xelatex",
+            "command": "xelatex",
+            "args": [
+                "-synctex=1",
+                "-file-line-error",
+                "-output-directory=%OUTDIR%",
+                "%RELATIVE_DOC%"
+            ],
+            "env": {}
+        },
+    ],
+    "latex-workshop.latex.recipes": [
+        {
+            "name": "xelatex-twice",
+            "tools": [
+                "xelatex",
+                "xelatex"
+            ]
+        },
+    ]
+}

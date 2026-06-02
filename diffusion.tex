@@ -1,0 +1,430 @@
+% !TEX program = xelatex
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────
+\usepackage{ctex}                % Chinese support (requires XeLaTeX/LuaLaTeX)
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{amsthm}
+\usepackage{bm}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{booktabs}
+\usepackage{tikz}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=cyan,
+    citecolor=green!50!black,
+}
+
+% ── Theorem Environments ──────────────────────────────────────────────
+\newtheorem{definition}{Definition}[section]
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{remark}{Remark}[section]
+\theoremstyle{definition}
+\newtheorem{example}{Example}[section]
+
+% ── Custom Commands ───────────────────────────────────────────────────
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathcal{N}}          % Gaussian distribution
+\newcommand{\D}{\mathcal{D}}
+\newcommand{\X}{\mathcal{X}}
+\newcommand{\Unif}{\mathcal{U}}       % uniform distribution (not \U — conflicts with XeTeX)
+\newcommand{\KL}{D_{\text{KL}}}
+
+% Macros for DDPM/DDIM
+\newcommand{\alphat}{\bar{\alpha}_t}
+\newcommand{\btd}{\tilde{\beta}_t}
+
+\title{\Huge Diffusion Models 学习笔记\\[0.3cm]
+       \large DDPM \& DDIM —— 公式推导与个人理解}
+\author{}
+\date{2026年5月29日}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ═══════════════════════════════════════════════════════════════════════
+%  1.  INTRODUCTION
+% ═══════════════════════════════════════════════════════════════════════
+\section{Introduction to Diffusion Models}
+
+Diffusion models 是一类基于 Markov 链的生成模型。简单来说就是两个过程来回搞：
+
+\begin{itemize}
+    \item \textbf{Forward process (扩散过程 / 加噪)}：往数据 $x_0$ 里逐步加 Gaussian 噪声，加 $T$ 步之后变成纯噪声 $x_T \sim \N(0, I)$。
+    \item \textbf{Reverse process (逆扩散过程 / 去噪)}：从纯噪声 $x_T$ 开始，一步步把噪声去掉，最后还原出像样的样本 $x_0$。
+\end{itemize}
+
+DDPM 和 DDIM 都是在这个框架上做的，但思路不太一样，先放个对比表有个直观印象：
+
+\begin{center}
+\begin{tabular}{c|c|c}
+    \toprule
+    & \textbf{DDPM} & \textbf{DDIM} \\
+    \midrule
+    前向过程 & Markov 链 & Markov 链 (复用 DDPM 的边际分布) \\
+    逆向过程 & Markov 链 (随机) & 非 Markov 链 (确定性) \\
+    采样速度 & 慢 ($T \approx 1000$) & 快 (最低 $10\sim 50$ 步就能跑) \\
+    采样方式 & 随机采样 & 确定性 / 半随机 ($\eta$ 控制) \\
+    \bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{个人理解：}DDIM 最妙的地方在于——它不重新训练模型，直接拿 DDPM 训练好的权重就能用，只是换了一种采样思路，速度直接快了几十倍。后面会详细讲为什么可以这样。\par
+
+
+% ═══════════════════════════════════════════════════════════════════════
+%  2.  DDPM
+% ═══════════════════════════════════════════════════════════════════════
+\section{DDPM: Denoising Diffusion Probabilistic Models}
+
+\subsection{Forward Process (前向扩散过程)}
+
+前向过程是一个固定的 Markov 链，一步步往数据里加高斯噪声，没什么可学的参数：
+
+\begin{equation}\label{eq:ddpm_forward}
+    q(x_{1:T} \mid x_0) = \prod_{t=1}^{T} q(x_t \mid x_{t-1})
+\end{equation}
+
+每一步的条件分布是个 Gaussian：
+
+\begin{equation}\label{eq:ddpm_forward_step}
+    q(x_t \mid x_{t-1}) = \N\!\big(x_t; \sqrt{1 - \beta_t}\, x_{t-1},\; \beta_t I \big)
+\end{equation}
+
+其中 $\beta_t \in (0, 1)$ 是 noise schedule，控制每一步加多少噪声。实际操作中 $\beta_1 \approx 10^{-4}$ 线性增加到 $\beta_T \approx 0.02$（这个值是 DDPM 论文里的经典设置，后面也有工作改进过这个 schedule，但这里不展开）。
+
+\medskip
+\textbf{重参数化技巧 (Reparameterization Trick).} 这是扩散模型里最常用的技巧之一。定义 $\alpha_t = 1 - \beta_t$，$\alphat = \prod_{s=1}^{t} \alpha_s$。因为高斯分布的可加性很好，我们可以跳过中间步骤，直接从 $x_0$ 算出任意时间步的 $x_t$：
+
+\begin{equation}\label{eq:ddpm_marginal}
+    q(x_t \mid x_0) = \N\!\big(x_t; \sqrt{\alphat}\, x_0,\; (1 - \alphat) I \big)
+\end{equation}
+
+也就是：
+\begin{equation}\label{eq:ddpm_reparam}
+    x_t = \sqrt{\alphat}\, x_0 + \sqrt{1 - \alphat}\, \epsilon, \quad \epsilon \sim \N(0, I)
+\end{equation}
+
+\textbf{注意：}这个公式超级重要，后面训练和采样都会反复用到。本质就是把 $x_t$ 写成了 $x_0$ 和噪声 $\epsilon$ 的线性组合。
+
+当 $T \to \infty$ 时 $\alphat \to 0$，所以 $q(x_T \mid x_0) \approx \N(0, I)$——也就是说加到最后基本就是纯噪声了，这也符合直觉。
+
+\subsection{Reverse Process (逆向去噪过程)}
+
+逆向过程是我们真正要学的部分。同样建模成 Markov 链，从 $p(x_T) = \N(0, I)$ 开始一步步去噪：
+
+\begin{equation}\label{eq:ddpm_reverse}
+    p_\theta(x_{0:T}) = p(x_T) \prod_{t=1}^{T} p_\theta(x_{t-1} \mid x_t)
+\end{equation}
+
+每一步假设为 Gaussian（这个假设在 $\beta_t$ 足够小时是合理的）：
+
+\begin{equation}\label{eq:ddpm_reverse_step}
+    p_\theta(x_{t-1} \mid x_t) = \N\!\big(x_{t-1}; \mu_\theta(x_t, t),\; \Sigma_\theta(x_t, t) \big)
+\end{equation}
+
+这里 $\mu_\theta$ 和 $\Sigma_\theta$ 都是神经网络要学的东西，不过实际 DDPM 把方差固定了，只学均值 $\mu_\theta$。
+
+
+
+\subsection{Parameterization (参数化方式)}
+
+顺着上面的思路，把 $\mu_\theta$ 参数化成和 $\tilde{\mu}_t$ 一样的形式：
+
+\begin{equation}\label{eq:ddpm_mu_theta}
+    \mu_\theta(x_t, t) = \frac{1}{\sqrt{\alpha_t}}\!\left( x_t - \frac{\beta_t}{\sqrt{1 - \alphat}}\, \epsilon_\theta(x_t, t) \right)
+\end{equation}
+
+$\epsilon_\theta$ 是一个神经网络（结构上通常是 U-Net），输入是 noisy 的 $x_t$ 和时间步 $t$，输出是对噪声 $\epsilon$ 的预测。
+
+\smallskip
+这样 $L_{t-1}$ 就化简成一个非常干净的形式——MSE 噪声预测误差：
+
+\begin{equation}\label{eq:ddpm_simple_loss}
+    L_{\text{simple}} = \E_{t, x_0, \epsilon}\!\left[ \big\| \epsilon - \epsilon_\theta(x_t, t) \big\|^2 \right]
+\end{equation}
+
+其中 $t \sim \Unif\{1, \dots, T\}$，$x_0 \sim q(x_0)$，$\epsilon \sim \N(0, I)$，$x_t = \sqrt{\alphat}\, x_0 + \sqrt{1 - \alphat}\, \epsilon$。
+
+\textbf{这就是 DDPM 最终用的 loss，极其简洁。} 训练时不需要变分推断那套复杂的 ELBO 计算——随机采一个 $t$，采一张图，加噪声，让网络预测噪声，算 MSE，反向传播。没了。
+
+\subsection{Sampling (采样算法)}
+
+训练完之后，推理时从 $x_T \sim \N(0, I)$ 开始，对 $t = T, T-1, \dots, 1$ 一步步迭代去噪：
+
+\begin{equation}\label{eq:ddpm_sample}
+    x_{t-1} = \frac{1}{\sqrt{\alpha_t}}\!\left( x_t - \frac{\beta_t}{\sqrt{1 - \alphat}}\, \epsilon_\theta(x_t, t) \right) + \sigma_t z
+\end{equation}
+
+$z \sim \N(0, I)$（$t > 1$ 时加噪声，最后一步 $t=1$ 时 $z=0$ 不加）。方差 $\sigma_t^2$ 一般取 $\beta_t$ 或者 $\tilde{\beta}_t = \frac{1 - \bar{\alpha}_{t-1}}{1 - \alphat}\beta_t$（后者是 posterior variance，理论上更合理一点）。
+
+\textbf{直观理解采样公式：}第一项 $\frac{1}{\sqrt{\alpha_t}}(x_t - \frac{\beta_t}{\sqrt{1-\alphat}}\epsilon_\theta)$ 是预测的去噪均值 $\mu_\theta$，第二项 $\sigma_t z$ 是额外注入的随机噪声——相当于每步去一点噪再加一点噪声，防止过程塌掉。随着 $t$ 减小，$\sigma_t$ 也越来越小，随机性逐渐减弱。
+
+\begin{algorithm}[ht]
+\caption{DDPM Training}
+\label{alg:ddpm_train}
+\begin{algorithmic}[1]
+\While{not converged}
+    \State $x_0 \sim q(x_0)$
+    \State $t \sim \Unif(\{1, \dots, T\})$
+    \State $\epsilon \sim \N(0, I)$
+    \State Take gradient descent step on $\nabla_\theta \| \epsilon - \epsilon_\theta(\sqrt{\alphat}\, x_0 + \sqrt{1 - \alphat}\, \epsilon, t) \|^2$
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[ht]
+\caption{DDPM Sampling}
+\label{alg:ddpm_sample}
+\begin{algorithmic}[1]
+\State $x_T \sim \N(0, I)$
+\For{$t = T, \dots, 1$}
+    \State $z \sim \N(0, I)$ if $t > 1$, else $z = 0$
+    \State $x_{t-1} = \frac{1}{\sqrt{\alpha_t}}\big( x_t - \frac{\beta_t}{\sqrt{1 - \alphat}} \epsilon_\theta(x_t, t) \big) + \sigma_t z$
+\EndFor
+\State \Return $x_0$
+\end{algorithmic}
+\end{algorithm}
+
+
+% ═══════════════════════════════════════════════════════════════════════
+%  3.  DDIM
+% ═══════════════════════════════════════════════════════════════════════
+\section{DDIM: Denoising Diffusion Implicit Models}
+
+\subsection{Motivation}
+
+DDPM 有几个很明显的痛点：
+
+\begin{itemize}
+    \item 采样要跑满 $T$ 步（通常 $T=1000$），生成一张图慢得离谱。
+    \item 采样是随机的——同一个 $x_T$ 跑两次结果不一样，没法复现。
+    \item 如果强行减少步数（比如只跑 100 步），生成质量会大幅下降，因为训练和推理的步数不匹配。
+\end{itemize}
+
+DDIM 的想法很聪明：\textbf{前向过程的边际分布 $q(x_t \mid x_0)$ 保持和 DDPM 一模一样}，但不要求逆向过程必须是 Markov 的。这样一来，已经训练好的 DDPM 模型不用动，只需要换一种采样方式，就能用更少步数、甚至确定性地生成。本质上是在"白嫖" DDPM 的训练成果。
+
+\subsection{Non-Markovian Forward Process}
+
+DDIM 定义一个非 Markov 的前向过程，其联合分布为：
+
+\begin{equation}\label{eq:ddim_forward}
+    q_\sigma(x_{1:T} \mid x_0) = q_\sigma(x_T \mid x_0) \prod_{t=2}^{T} q_\sigma(x_{t-1} \mid x_t, x_0)
+\end{equation}
+
+其中每一步的条件分布为：
+
+\begin{equation}\label{eq:ddim_forward_step}
+    q_\sigma(x_{t-1} \mid x_t, x_0) = \N\!\big(
+        x_{t-1}; \;
+        \sqrt{\bar{\alpha}_{t-1}}\, x_0 + \sqrt{1 - \bar{\alpha}_{t-1} - \sigma_t^2} \cdot \frac{x_t - \sqrt{\alphat}\, x_0}{\sqrt{1 - \alphat}},\;
+        \sigma_t^2 I
+    \big)
+\end{equation}
+
+可以验证，这个非 Markov 的前向过程仍然保持和 DDPM 一样的边际分布：
+
+\begin{equation}\label{eq:ddim_marginal_check}
+    q_\sigma(x_t \mid x_0) = \N(\sqrt{\alphat}\, x_0,\, (1 - \alphat) I)
+\end{equation}
+
+\textbf{这就是 DDIM 的核心 trick：}边际分布不变 $\Rightarrow$ 训练目标不变 $\Rightarrow$ 已经训练好的 DDPM 模型可以直接拿来用，一行代码都不用改。换采样算法就行。
+
+\subsection{Deterministic Sampling (确定性采样)}
+
+当 $\sigma_t = 0$ 时，逆向过程变为确定性映射。给定 $x_t$，可以用 $\epsilon_\theta$ 预测 $x_0$：
+
+\begin{equation}\label{eq:ddim_pred_x0}
+    \hat{x}_0 = \frac{x_t - \sqrt{1 - \alphat}\, \epsilon_\theta(x_t, t)}{\sqrt{\alphat}}
+\end{equation}
+
+然后沿着「指向 $x_t$」的方向得到 $x_{t-1}$：
+
+\begin{equation}\label{eq:ddim_sample_det}
+    x_{t-1} = \underbrace{\sqrt{\bar{\alpha}_{t-1}}\, \hat{x}_0}_{\text{predicted } x_0 \text{ component}}
+            \;+\; \underbrace{\sqrt{1 - \bar{\alpha}_{t-1}}\, \epsilon_\theta(x_t, t)}_{\text{denoised direction to } x_t}
+\end{equation}
+
+这实际上就是在用 Euler 法求解某个 ODE，所以 DDIM 可以理解为把扩散模型的采样变成了一个 ODE 求解问题——这也是后来 consistency models、rectified flow 等一系列加速采样工作的思想源头。
+
+\subsection{General Sampling with $\eta$ (带随机性的采样)}
+
+引入超参数 $\eta \in [0, 1]$ 控制采样的随机性：
+
+\begin{equation}\label{eq:ddim_eta}
+    \sigma_t = \eta \cdot \sqrt{\frac{1 - \bar{\alpha}_{t-1}}{1 - \alphat}} \cdot \sqrt{1 - \frac{\alphat}{\bar{\alpha}_{t-1}}}
+\end{equation}
+
+\begin{itemize}
+    \item $\eta = 0$：确定性 DDIM (等价于 probability flow ODE)。
+    \item $\eta = 1$：恢复 DDPM 的随机采样 (当 $\sigma_t$ 取 DDPM 形式时)。
+    \item $0 < \eta < 1$：介于两者之间。
+\end{itemize}
+
+通用采样公式为：
+
+\begin{equation}\label{eq:ddim_sample_general}
+    x_{t-1} = \sqrt{\bar{\alpha}_{t-1}}\, \hat{x}_0
+            + \sqrt{1 - \bar{\alpha}_{t-1} - \sigma_t^2}\, \epsilon_\theta(x_t, t)
+            + \sigma_t\, \epsilon, \quad \epsilon \sim \N(0, I)
+\end{equation}
+
+\subsection{Accelerated Sampling (加速采样)}
+
+由于 $q_\sigma(x_t \mid x_0)$ 不依赖具体的采样路径，DDIM 可以在一个子序列上进行采样。
+
+令 $\tau$ 为 $\{1, \dots, T\}$ 的长度为 $S$（$S \ll T$）的子序列，则 $x_{\tau_{s-1}}$ 可以直接由 $x_{\tau_s}$ 得到：
+
+\begin{equation}\label{eq:ddim_subseq}
+    x_{\tau_{s-1}} = \sqrt{\bar{\alpha}_{\tau_{s-1}}}\, \hat{x}_0
+                   + \sqrt{1 - \bar{\alpha}_{\tau_{s-1}} - \sigma_{\tau_s}^2}\, \epsilon_\theta(x_{\tau_s}, \tau_s)
+                   + \sigma_{\tau_s}\, \epsilon
+\end{equation}
+
+实际用的时候 $S$ 取 10 到 50 步就能出质量不错的结果，和 DDPM 全 1000 步比几乎看不出来区别，快了 20--100 倍。这个加速比在当时的硬件条件下简直是降维打击。
+
+\begin{algorithm}[ht]
+\caption{DDIM Sampling (deterministic, $\eta = 0$)}
+\label{alg:ddim_sample}
+\begin{algorithmic}[1]
+\State $x_T \sim \N(0, I)$
+\For{$t = T, T - \Delta t, \dots, 1$} \Comment{使用子序列，步长 $\Delta t$}
+    \State $\hat{x}_0 = \frac{x_t - \sqrt{1 - \alphat}\, \epsilon_\theta(x_t, t)}{\sqrt{\alphat}}$
+    \State $x_{t-\Delta t} = \sqrt{\bar{\alpha}_{t-\Delta t}}\, \hat{x}_0 + \sqrt{1 - \bar{\alpha}_{t-\Delta t}}\, \epsilon_\theta(x_t, t)$
+\EndFor
+\State \Return $x_0$
+\end{algorithmic}
+\end{algorithm}
+
+
+% ═══════════════════════════════════════════════════════════════════════
+%  4.  CONNECTIONS & COMPARISONS
+% ═══════════════════════════════════════════════════════════════════════
+\section{Connections \& Comparisons}
+
+\subsection{DDPM $\subset$ DDIM (DDPM 只是 DDIM 的特例)}
+
+DDPM 其实是 DDIM 框架的一个 corner case。当 $\eta = 1$ 而且跑满 $T$ 步时，DDIM 的采样就和 DDPM 的随机采样完全一样了。
+
+验证一下，取 $\sigma_t$ 如式~(\ref{eq:ddim_eta})，令 $\eta = 1$：
+\begin{equation}\label{eq:ddpm_via_ddim}
+    \sigma_t = \sqrt{\frac{1 - \bar{\alpha}_{t-1}}{1 - \alphat}} \cdot \sqrt{1 - \frac{\alphat}{\bar{\alpha}_{t-1}}}
+            = \sqrt{\frac{1 - \bar{\alpha}_{t-1}}{1 - \alphat}\, \beta_t}
+            = \sqrt{\btd}
+\end{equation}
+
+$\btd$ 就是 DDPM 里 posterior variance 的那个下界。对上了。
+
+所以可以理解为：DDIM 是 DDPM 采样过程的"超集"——DDPM 只是 DDIM 在 $\eta=1$、全步长下的特例。
+
+
+
+\subsection{实际使用建议 (Practical Considerations)}
+
+\begin{itemize}
+    \item \textbf{训练}：DDPM 和 DDIM 训练完全一样，没有任何区别。用 DDPM 训好的 checkpoint 直接就能拿来做 DDIM 推理，不需要重新训练。
+    \item \textbf{采样质量 vs 速度的取舍}：
+    \begin{itemize}
+        \item DDPM ($T=1000$)：质量上限最高，但真的慢。
+        \item DDIM ($S=10\sim 50$, $\eta=0$)：质量差不太多，但快 $20\sim 100$ 倍，日常用最划算。
+        \item DDIM ($S=10\sim 50$, $\eta>0$)：加一点随机性，质量在某些场景（尤其高分辨率）会比纯确定性略好，同时还是比 DDPM 快很多。
+    \end{itemize}
+    \item \textbf{确定性的好处}：$\eta=0$ 时 $x_T$ 唯一确定 $x_0$，DDIM 就变成了一个\emph{隐式模型}（给定噪声→给定图片），可以做 latent space interpolation、语义编辑之类好玩的操作。这点 DDPM 做不到，因为它的随机性导致同样的 $x_T$ 每次跑出来的结果不同。
+\end{itemize}
+
+
+% ═══════════════════════════════════════════════════════════════════════
+%  5.  SUMMARY OF KEY FORMULAS
+% ═══════════════════════════════════════════════════════════════════════
+\section{Summary of Key Formulas}
+
+\subsection*{Notation}
+
+\begin{center}
+\begin{tabular}{c|l}
+    \toprule
+    Symbol & Meaning \\
+    \midrule
+    $x_0$ & clean data sample \\
+    $x_t$ & noisy sample at timestep $t$ \\
+    $\beta_t$ & noise variance scheduled at step $t$ \\
+    $\alpha_t$ & $1 - \beta_t$ \\
+    $\alphat$ & $\prod_{s=1}^{t} \alpha_s$ \\
+    $\epsilon$ & standard Gaussian noise $\N(0, I)$ \\
+    $\epsilon_\theta$ & noise prediction network (U-Net) \\
+    $T$ & total diffusion steps (e.g., 1000) \\
+    \bottomrule
+\end{tabular}
+\end{center}
+
+\subsection*{DDPM Cheat Sheet}
+
+\begin{align}
+    &\text{Forward:}         & q(x_t \mid x_{t-1}) &= \N(x_t; \sqrt{1-\beta_t}\,x_{t-1}, \beta_t I) \\[4pt]
+    &\text{Marginal:}        & q(x_t \mid x_0)     &= \N(x_t; \sqrt{\alphat}\,x_0, (1-\alphat)I) \\[4pt]
+    &\text{Noisy sample:}    & x_t                  &= \sqrt{\alphat}\,x_0 + \sqrt{1-\alphat}\,\epsilon \\[4pt]
+    &\text{Loss function:}   & L_{\text{simple}}    &= \E_{t,x_0,\epsilon}\big\| \epsilon - \epsilon_\theta(x_t, t) \big\|^2 \\[4pt]
+    &\text{Sampling:}        & x_{t-1}              &= \frac{1}{\sqrt{\alpha_t}}\big(x_t - \frac{\beta_t}{\sqrt{1-\alphat}}\epsilon_\theta(x_t,t)\big) + \sigma_t z
+\end{align}
+
+\subsection*{DDIM Cheat Sheet}
+
+\begin{align}
+    &\text{Predicted } x_0:   & \hat{x}_0                     &= \frac{x_t - \sqrt{1 - \alphat}\,\epsilon_\theta(x_t, t)}{\sqrt{\alphat}} \\[4pt]
+    &\text{Sampling (general):} & x_{t-1}                     &= \sqrt{\bar{\alpha}_{t-1}}\,\hat{x}_0
+                                                                + \sqrt{1 - \bar{\alpha}_{t-1} - \sigma_t^2}\,\epsilon_\theta(x_t, t)
+                                                                + \sigma_t \epsilon \\[4pt]
+    &\text{Deterministic} (\eta=0): & x_{t-1}                 &= \sqrt{\bar{\alpha}_{t-1}}\,\hat{x}_0 + \sqrt{1 - \bar{\alpha}_{t-1}}\,\epsilon_\theta(x_t, t) \\[4pt]
+    &\text{Noise scale:}      & \sigma_t                      &= \eta \cdot \sqrt{\frac{1-\bar{\alpha}_{t-1}}{1-\alphat}} \cdot \sqrt{1 - \frac{\alphat}{\bar{\alpha}_{t-1}}}
+\end{align}
+
+\subsection*{Relationships (总结三者关系)}
+
+\begin{itemize}
+    \item $\eta = 1$ + 全步长 $\Rightarrow$ 回到 DDPM 随机采样。
+    \item $\eta = 0$ + 子序列 $\Rightarrow$ 确定性 DDIM，快速采样。
+    \item Score connection: $\epsilon_\theta(x_t, t) \approx -\sqrt{1-\alphat}\,\nabla_{x_t}\log p_t(x_t)$，连接了扩散模型和 score-based 模型。
+\end{itemize}
+
+\medskip
+\textbf{写到最后：} DDPM 和 DDIM 的核心区别其实就一句话——DDPM 用 Markov 链做随机采样，DDIM 换了个非 Markov 的视角把它变成了类 ODE 的确定性过程。DDIM 没有重新定义训练，只是换了采样方式，所以是"免费"的加速。理解了这一点，后面看 consistency models、rectified flow、flow matching 这些后续工作就容易多了。本质上大家都在想办法让这个"噪声→数据"的映射更快、更稳、更可控。
+
+
+% ═══════════════════════════════════════════════════════════════════════
+%  REFERENCES
+% ═══════════════════════════════════════════════════════════════════════
+\begin{thebibliography}{99}
+
+\bibitem{ddpm}
+J. Ho, A. Jain, and P. Abbeel,
+\textit{Denoising Diffusion Probabilistic Models},
+NeurIPS, 2020.
+
+\bibitem{ddim}
+J. Song, C. Meng, and S. Ermon,
+\textit{Denoising Diffusion Implicit Models},
+ICLR, 2021.
+
+\bibitem{sde}
+Y. Song, J. Sohl-Dickstein, D. P. Kingma, A. Kumar, S. Ermon, and B. Poole,
+\textit{Score-Based Generative Modeling through Stochastic Differential Equations},
+ICLR, 2021.
+
+\bibitem{improved_ddpm}
+A. Nichol and P. Dhariwal,
+\textit{Improved Denoising Diffusion Probabilistic Models},
+ICML, 2021.
+
+\end{thebibliography}
+
+\end{document}
