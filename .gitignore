@@ -12,5 +12,9 @@ missfont.log
 # Output directory
 out/
 
+# Generated outputs
+*.pt
+samples_*.png
+
 # macOS
 .DS_Store
